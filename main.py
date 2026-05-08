@@ -2,21 +2,25 @@ import cv2
 import numpy as np
 import argparse
 from dataclasses import dataclass
-from typing import Optional
 from cv2.videoio_registry import getBackendName
 from cv2_enumerate_cameras import supported_backends, enumerate_cameras
 from pathlib import Path
+import iris
+import matplotlib.pyplot as plt
+import time
+import json
 
 def good_brightness(frame, min_threshold=50, max_threshold=200):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    brightness = np.mean(gray)
+    brightness = np.mean(frame)
     return brightness > min_threshold and brightness < max_threshold, brightness
 
 def main():
 
     config = parse_args()
 
-    if config.filename is None:
+    using_camera = config.filename is None
+
+    if using_camera:
         cam = select_camera()
         cap = cv2.VideoCapture(cam.index, cam.backend)
     else:
@@ -27,10 +31,18 @@ def main():
         print("Failed to open")
         print(cap.getExceptionMode())
 
+    highest_sharp = None
+    highest_sharp_frame = None
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    highest_sharp_iris_pipeline: iris.IRISPipeline | None = None
+    highest_sharp_output = None
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         ok, brightness = good_brightness(frame)
 
@@ -39,17 +51,84 @@ def main():
 
         cv2.imshow("Frame", frame)
 
+        iris_pipeline = iris.IRISPipeline()
+        
+        start = time.time()
+        output = iris_pipeline.run(
+            iris.IRImage(
+                img_data=frame,
+                image_id="sharpness_test",
+                eye_side="right",
+            )
+        )
+
+        elapsed = time.time() - start
+
+        if using_camera:
+            for _ in range(int(fps * elapsed)):
+                cap.grab()
+
+        if output.get("error") is not None:
+            print("Image skipped: ", output["error"]["error_type"])
+            if cv2.waitKey(30) == ord("q"):
+                break
+            continue
+        
+        sharpness = output["metadata"]["sharpness_score"]
+
+        print(f"Sharpness: {sharpness:.2f}, Brightness: {brightness:.2f}, Elapsed: {elapsed:.2f}s")
+        if highest_sharp is None or sharpness > highest_sharp:
+            highest_sharp_frame = frame
+            highest_sharp = sharpness
+            highest_sharp_iris_pipeline = iris_pipeline
+            highest_sharp_output = output
+
+            if sharpness > 461:
+                print("-"*50)
+                print("Found good image!")
+                print("-"*50)
+
         if cv2.waitKey(30) == ord("q"):
             break
 
     cap.release()
     cv2.destroyAllWindows()
 
+    if highest_sharp_iris_pipeline is None:
+        print("No frames processed")
+        exit(0)
+    
+    assert highest_sharp_output is not None
+    assert highest_sharp_frame is not None
+
+    # print(json.dumps(highest_sharp_output, indent=4))
+
+    iris_visualizer = iris.visualisation.IRISVisualizer()
+    
+    canvas = iris_visualizer.plot_all_geometry(
+        ir_image=iris.IRImage(img_data=highest_sharp_frame, eye_side="right", image_id=None),
+        geometry_polygons=highest_sharp_iris_pipeline.call_trace['geometry_estimation'],
+        eye_orientation=highest_sharp_iris_pipeline.call_trace['eye_orientation'],
+        eye_center=highest_sharp_iris_pipeline.call_trace['eye_center_estimation'],
+    )
+
+    plt.show()
+    
+    canvas = iris_visualizer.plot_iris_template(highest_sharp_output["iris_template"])
+
+    plt.show()
+
+    canvas = iris_visualizer.plot_normalized_iris(
+        normalized_iris=highest_sharp_iris_pipeline.call_trace['normalization'],
+    )
+    plt.show()
+
+
 
 
 @dataclass
 class Config:
-    filename: Optional[str]
+    filename: str | None
 
 
 def parse_args() -> Config:
