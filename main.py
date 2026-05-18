@@ -9,6 +9,7 @@ import iris
 import matplotlib.pyplot as plt
 import time
 import json
+from db_manager import Db
 
 def good_brightness(frame, min_threshold=50, max_threshold=200):
     brightness = np.mean(frame)
@@ -64,7 +65,7 @@ def main():
 
         elapsed = time.time() - start
 
-        if using_camera:
+        if not using_camera:
             for _ in range(int(fps * elapsed)):
                 cap.grab()
 
@@ -123,6 +124,13 @@ def main():
     )
     plt.show()
 
+    name = input("Enter a name: ")
+    db = Db()
+    db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
+
+    # matcher = iris.HammingDistanceMatcher()
+    # matcher.run
+    # iris.IrisTemplate()
 
 
 
