@@ -124,14 +124,30 @@ def main():
     )
     plt.show()
 
+    mode = input("Do you want to compare, instead of storing? (y/n)")
     name = input("Enter a name: ")
+
     db = Db()
-    db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
 
-    # matcher = iris.HammingDistanceMatcher()
-    # matcher.run
-    # iris.IrisTemplate()
+    if mode == 'y' or mode == 'Y':
+        StoredEye = db.getEyeTemplate(name)
+        if StoredEye is None:
+            print("Name not found")
+            return
+        
+        matcher = iris.HammingDistanceMatcher()
 
+        distance = matcher.run(highest_sharp_output["iris_template"], StoredEye)
+
+        print(f"Hamming distance: {distance}")
+
+        if distance < 0.33:
+            print("Eye matches name")
+        else:
+            print("Different eyes")
+    
+    else:
+        db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
 
 
 @dataclass

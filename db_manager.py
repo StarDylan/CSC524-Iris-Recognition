@@ -14,6 +14,7 @@ class Db:
     # If data under that name already exists, we keep only the sharpest data
     def replace(self, name, code : iris.IrisTemplate , sharpness):
         serialized_template = code.serialize()
+        
 
         newEye = {
             "code" : serialized_template,
@@ -33,6 +34,18 @@ class Db:
         with self.path.open("w") as f:
             json.dump(data, f, indent=2)
 
+    # Returns the Iris template under the name given
+    def getEyeTemplate(self, name) -> iris.IrisTemplate:
+
+        with self.path.open("r") as f:
+            data = json.load(f)
+        
+        if name not in data:
+            return None
+        
+        eye = data[name]
+
+        return iris.IrisTemplate.deserialize(eye["code"])
 
             
         
