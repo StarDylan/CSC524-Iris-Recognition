@@ -47,6 +47,17 @@ class Db:
 
         return iris.IrisTemplate.deserialize(eye["code"])
 
+    def get_all_eye_templates(self) -> iris.IrisTemplate:
+        with self.path.open("r") as f:
+            data = json.load(f)
+        
+        templates = []
+        for name in data:
+            templates.append((iris.IrisTemplate.deserialize(data[name]["code"]), name))
+        
+        return templates
+
+
             
         
 

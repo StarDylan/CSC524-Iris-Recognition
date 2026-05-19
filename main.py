@@ -76,6 +76,7 @@ def main():
             continue
         
         sharpness = output["metadata"]["sharpness_score"]
+        print(output)
 
         print(f"Sharpness: {sharpness:.2f}, Brightness: {brightness:.2f}, Elapsed: {elapsed:.2f}s")
         if highest_sharp is None or sharpness > highest_sharp:
@@ -124,30 +125,26 @@ def main():
     )
     plt.show()
 
-    mode = input("Do you want to compare, instead of storing? (y/n)")
-    name = input("Enter a name: ")
+    mode = input("Do you want to store? (y/n)")
 
     db = Db()
 
-    if mode == 'y' or mode == 'Y':
-        StoredEye = db.getEyeTemplate(name)
-        if StoredEye is None:
-            print("Name not found")
-            return
-        
+    
+    if mode == "y" or mode == "Y":
+        name = input("Enter a name: ")
+        db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
+
+    for eye in db.get_all_eye_templates():
+    
         matcher = iris.HammingDistanceMatcher()
 
-        distance = matcher.run(highest_sharp_output["iris_template"], StoredEye)
-
-        print(f"Hamming distance: {distance}")
+        distance = matcher.run(highest_sharp_output["iris_template"], eye[0])
 
         if distance < 0.33:
-            print("Eye matches name")
+            print(f"====Match==== {eye[1]} - {distance} ||||||||")
         else:
-            print("Different eyes")
-    
-    else:
-        db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
+            print(f"------------- {eye[1]} - {distance}")
+
 
 
 @dataclass
