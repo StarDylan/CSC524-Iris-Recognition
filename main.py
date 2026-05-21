@@ -1,19 +1,90 @@
+from cv2 import VideoCapture
 import cv2
 import numpy as np
 import argparse
 from dataclasses import dataclass
+from typing import cast
 from cv2.videoio_registry import getBackendName
 from cv2_enumerate_cameras import supported_backends, enumerate_cameras
 from pathlib import Path
 import iris
 import matplotlib.pyplot as plt
 import time
-import json
 from db_manager import Db
+import threading
+import time
 
-def good_brightness(frame, min_threshold=50, max_threshold=200):
-    brightness = np.mean(frame)
+
+def good_brightness(frame: np.ndarray, min_threshold: float = 50, max_threshold: float = 200) -> tuple[bool, float]:
+    brightness = float(np.mean(frame))
     return brightness > min_threshold and brightness < max_threshold, brightness
+
+
+@dataclass
+class SharpCandidate:
+    frame: np.ndarray
+    iris_pipeline: iris.IRISPipeline
+    output: dict[str, object]
+    sharpness: float
+    brightness: float
+    elapsed: float
+
+
+def keep_top_candidates(candidates: list[SharpCandidate], candidate: SharpCandidate, limit: int = 5) -> None:
+    candidates.append(candidate)
+    candidates.sort(key=lambda item: item.sharpness, reverse=True)
+    del candidates[limit:]
+
+
+def select_candidate(candidates: list[SharpCandidate]) -> SharpCandidate:
+    print("\nTop sharp images:")
+    for index, candidate in enumerate(candidates, start=1):
+        print(f"{index}: Sharpness {candidate.sharpness:.2f}, Brightness {candidate.brightness:.2f}, Elapsed {candidate.elapsed:.2f}s")
+
+    plt.ion()
+    fig, axes = plt.subplots(1, len(candidates), figsize=(4 * len(candidates), 4))
+    if len(candidates) == 1:
+        axes = [axes]
+
+    for index, (axis, candidate) in enumerate(zip(axes, candidates, strict=False), start=1):
+        axis.imshow(candidate.frame, cmap="gray")
+        axis.set_title(str(index))
+        axis.axis("off")
+
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.01)
+
+    while True:
+        try:
+            choice = input(f"Select image to continue analysis [1-{len(candidates)}] (or q to quit): ").strip()
+            if choice.lower() == "q":
+                plt.close(fig)
+                raise SystemExit(0)
+
+            if choice.isdigit():
+                selected_index = int(choice)
+                if 1 <= selected_index <= len(candidates):
+                    selected = candidates[selected_index - 1]
+                    plt.close(fig)
+                    return selected
+
+            print("Invalid selection. Please enter a valid number from the list.")
+        except (KeyboardInterrupt):
+            continue
+
+latest_frame = None
+lock = threading.Lock()
+running = True
+
+def grab_frames(cap: VideoCapture):
+    global latest_frame
+    while running:
+        ret, frame = cap.read()
+        if ret:
+            with lock:
+                latest_frame = frame
+
 
 def main():
 
@@ -25,24 +96,36 @@ def main():
         cam = select_camera()
         cap = cv2.VideoCapture(cam.index, cam.backend)
     else:
-        cap = cv2.VideoCapture(config.filename)
-        print(f"Using video file {config.filename}")
+        filename = config.filename
+        if filename is None:
+            raise ValueError("A filename is required when not using a camera")
+        cap = cv2.VideoCapture(filename)
+        print(f"Using video file {filename}")
 
     if not cap.isOpened():
         print("Failed to open")
         print(cap.getExceptionMode())
 
-    highest_sharp = None
-    highest_sharp_frame = None
-
     fps = cap.get(cv2.CAP_PROP_FPS)
-    highest_sharp_iris_pipeline: iris.IRISPipeline | None = None
-    highest_sharp_output = None
+    top_candidates: list[SharpCandidate] = []
+
+    if using_camera:
+        thread = threading.Thread(target=lambda: grab_frames(cap), daemon=True)
+        thread.start()
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        if using_camera:
+            with lock:
+                frame = None if latest_frame is None else latest_frame.copy()
+
+            if frame is None:
+                time.sleep(0.01)
+                continue
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         ok, brightness = good_brightness(frame)
@@ -55,40 +138,47 @@ def main():
         iris_pipeline = iris.IRISPipeline()
         
         start = time.time()
-        output = iris_pipeline.run(
+        raw_output = iris_pipeline.run(
             iris.IRImage(
                 img_data=frame,
                 image_id="sharpness_test",
                 eye_side="right",
             )
         )
+        output = cast(dict[str, object], raw_output)
 
         elapsed = time.time() - start
 
         if not using_camera:
             for _ in range(int(fps * elapsed)):
-                cap.grab()
+                _ = cap.grab()
 
         if output.get("error") is not None:
-            print("Image skipped: ", output["error"]["error_type"])
+            error = cast(dict[str, object], output["error"])
+            print("Image skipped:", error["error_type"])
             if cv2.waitKey(30) == ord("q"):
                 break
             continue
         
-        sharpness = output["metadata"]["sharpness_score"]
+        metadata = cast(dict[str, object], output["metadata"])
+        sharpness = float(cast(float, metadata["sharpness_score"]))
         print(output)
 
         print(f"Sharpness: {sharpness:.2f}, Brightness: {brightness:.2f}, Elapsed: {elapsed:.2f}s")
-        if highest_sharp is None or sharpness > highest_sharp:
-            highest_sharp_frame = frame
-            highest_sharp = sharpness
-            highest_sharp_iris_pipeline = iris_pipeline
-            highest_sharp_output = output
+        candidate = SharpCandidate(
+            frame=frame.copy(),
+            iris_pipeline=iris_pipeline,
+            output=output,
+            sharpness=sharpness,
+            brightness=brightness,
+            elapsed=elapsed,
+        )
+        keep_top_candidates(top_candidates, candidate)
 
-            if sharpness > 461:
-                print("-"*50)
-                print("Found good image!")
-                print("-"*50)
+        if sharpness > 461:
+            print("-"*50)
+            print("Found good image!")
+            print("-"*50)
 
         if cv2.waitKey(30) == ord("q"):
             break
@@ -96,33 +186,43 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
-    if highest_sharp_iris_pipeline is None:
+    if not top_candidates:
         print("No frames processed")
         exit(0)
     
-    assert highest_sharp_output is not None
-    assert highest_sharp_frame is not None
-
-    # print(json.dumps(highest_sharp_output, indent=4))
+    selected_candidate = select_candidate(top_candidates)
+    selected_output = selected_candidate.output
+    selected_frame = selected_candidate.frame
+    selected_pipeline = selected_candidate.iris_pipeline
+    selected_template = cast(iris.IrisTemplate, selected_output["iris_template"])
+    selected_metadata = cast(dict[str, object], selected_output["metadata"])
+    selected_call_trace = cast(dict[str, object], selected_pipeline.call_trace)
+    selected_geometry = cast(iris.GeometryPolygons, selected_call_trace["geometry_estimation"])
+    selected_eye_orientation = cast(iris.EyeOrientation, selected_call_trace["eye_orientation"])
+    selected_eye_center = cast(iris.EyeCenters, selected_call_trace["eye_center_estimation"])
+    selected_normalized_iris = cast(iris.NormalizedIris, selected_call_trace["normalization"])
 
     iris_visualizer = iris.visualisation.IRISVisualizer()
     
-    canvas = iris_visualizer.plot_all_geometry(
-        ir_image=iris.IRImage(img_data=highest_sharp_frame, eye_side="right", image_id=None),
-        geometry_polygons=highest_sharp_iris_pipeline.call_trace['geometry_estimation'],
-        eye_orientation=highest_sharp_iris_pipeline.call_trace['eye_orientation'],
-        eye_center=highest_sharp_iris_pipeline.call_trace['eye_center_estimation'],
+    geometry_canvas = iris_visualizer.plot_all_geometry(
+        ir_image=iris.IRImage(img_data=selected_frame, eye_side="right", image_id=None),
+        geometry_polygons=selected_geometry,
+        eye_orientation=selected_eye_orientation,
+        eye_center=selected_eye_center,
     )
+    assert geometry_canvas is not None
 
     plt.show()
     
-    canvas = iris_visualizer.plot_iris_template(highest_sharp_output["iris_template"])
+    template_canvas = iris_visualizer.plot_iris_template(selected_template)
+    assert template_canvas is not None
 
     plt.show()
 
-    canvas = iris_visualizer.plot_normalized_iris(
-        normalized_iris=highest_sharp_iris_pipeline.call_trace['normalization'],
+    normalized_canvas = iris_visualizer.plot_normalized_iris(
+        normalized_iris=selected_normalized_iris,
     )
+    assert normalized_canvas is not None
     plt.show()
 
     mode = input("Do you want to store? (y/n)")
@@ -132,13 +232,13 @@ def main():
     
     if mode == "y" or mode == "Y":
         name = input("Enter a name: ")
-        db.replace(name, highest_sharp_output['iris_template'], highest_sharp_output["metadata"]["sharpness_score"])
+        db.replace(name, selected_template, cast(float, selected_metadata["sharpness_score"]))
 
     for eye in db.get_all_eye_templates():
     
         matcher = iris.HammingDistanceMatcher()
 
-        distance = matcher.run(highest_sharp_output["iris_template"], eye[0])
+        distance = matcher.run(selected_template, eye[0])
 
         if distance < 0.33:
             print(f"====Match==== {eye[1]} - {distance} ||||||||")
@@ -155,7 +255,7 @@ class Config:
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description="CSC524 IRIS Recognition System")
     
-    parser.add_argument(
+    _ = parser.add_argument(
         "-f",
         "--filename",
         nargs="?",
@@ -163,14 +263,15 @@ def parse_args() -> Config:
     )
 
     args = parser.parse_args()
+    filename = cast(str | None, args.filename)
 
 
-    if args.filename and not Path(args.filename).exists():
-        print(f"Error! Can't find file {args.filename}")
+    if filename is not None and not Path(filename).exists():
+        print(f"Error! Can't find file {filename}")
         exit()
 
 
-    return Config(filename=args.filename)
+    return Config(filename=filename)
 
 
 def list_cameras():

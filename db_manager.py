@@ -35,7 +35,7 @@ class Db:
             json.dump(data, f, indent=2)
 
     # Returns the Iris template under the name given
-    def getEyeTemplate(self, name) -> iris.IrisTemplate:
+    def getEyeTemplate(self, name) -> iris.IrisTemplate | None:
 
         with self.path.open("r") as f:
             data = json.load(f)
@@ -47,7 +47,7 @@ class Db:
 
         return iris.IrisTemplate.deserialize(eye["code"])
 
-    def get_all_eye_templates(self) -> iris.IrisTemplate:
+    def get_all_eye_templates(self) -> list[tuple[iris.IrisTemplate, str]]:
         with self.path.open("r") as f:
             data = json.load(f)
         
