@@ -28,18 +28,20 @@ class SharpCandidate:
     sharpness: float
     brightness: float
     elapsed: float
+    occlusion90: float
+    occlusion30: float
 
 
 def keep_top_candidates(candidates: list[SharpCandidate], candidate: SharpCandidate, limit: int = 5) -> None:
     candidates.append(candidate)
-    candidates.sort(key=lambda item: item.sharpness, reverse=True)
+    candidates.sort(key=lambda item: (item.sharpness * item.occlusion90 * item.occlusion30), reverse=True)
     del candidates[limit:]
 
 
 def select_candidate(candidates: list[SharpCandidate]) -> SharpCandidate:
     print("\nTop sharp images:")
     for index, candidate in enumerate(candidates, start=1):
-        print(f"{index}: Sharpness {candidate.sharpness:.2f}, Brightness {candidate.brightness:.2f}, Elapsed {candidate.elapsed:.2f}s")
+        print(f"{index}: Sharpness {candidate.sharpness:.2f}, Brightness {candidate.brightness:.2f}, Elapsed {candidate.elapsed:.2f}s, Occlusion90 {candidate.occlusion90:.2f}, Occlusion30 {candidate.occlusion30:.2f}")
 
     plt.ion()
     fig, axes = plt.subplots(1, len(candidates), figsize=(4 * len(candidates), 4))
@@ -133,7 +135,7 @@ def main():
         if not ok:
             continue
 
-        cv2.imshow("Frame", frame)
+        cv2.imshow("Frame", cv2.flip(frame,  1)) # Mirror for user-friendly camera preview
 
         iris_pipeline = iris.IRISPipeline()
         
@@ -162,6 +164,9 @@ def main():
         
         metadata = cast(dict[str, object], output["metadata"])
         sharpness = float(cast(float, metadata["sharpness_score"]))
+        occlusion90 = float(cast(float, metadata["occlusion90"]))
+        occlusion30 = float(cast(float, metadata["occlusion30"]))
+
         print(output)
 
         print(f"Sharpness: {sharpness:.2f}, Brightness: {brightness:.2f}, Elapsed: {elapsed:.2f}s")
@@ -172,10 +177,12 @@ def main():
             sharpness=sharpness,
             brightness=brightness,
             elapsed=elapsed,
+            occlusion90=occlusion90,
+            occlusion30=occlusion30,
         )
         keep_top_candidates(top_candidates, candidate)
 
-        if sharpness > 461:
+        if sharpness > 461 and occlusion90 > 0.8 and occlusion30 > 0.9:
             print("-"*50)
             print("Found good image!")
             print("-"*50)
